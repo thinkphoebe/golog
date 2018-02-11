@@ -1,4 +1,4 @@
-# Golog
+# Golog [![GoDoc](https://godoc.org/github.com/thinkphoebe/golog?status.svg)](https://godoc.org/github.com/thinkphoebe/golog)
 Golog is a lightweight and expandable logger for Golang.
 
 ## Features
@@ -138,3 +138,5 @@ log.SetLevel(LevelInfo)
 #### Use you own writer
 You can implement your own writers in addition to ConsoleWriter and RotateWriter. 
 You need to implement IOutput interface defined in log.go and pass it to log.NewLogger() or log.Init().
+
+#### [View documents from godoc](https://godoc.org/github.com/thinkphoebe/golog)
