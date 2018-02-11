@@ -2,6 +2,7 @@ package golog
 
 import "io"
 
+// Write logs to console with colors
 type ConsoleWriter struct {
 	colored bool
 	brush   [int(LevelCritical) + 1][]byte
@@ -18,6 +19,7 @@ var defaultBrush = [...][]byte{
 
 var resetBrush = []byte("\033[0m")
 
+// Create a new ConsoleWriter
 func NewConsoleWriter(dst io.Writer) *ConsoleWriter {
 	w := &ConsoleWriter{
 		colored: true,
@@ -27,10 +29,12 @@ func NewConsoleWriter(dst io.Writer) *ConsoleWriter {
 	return w
 }
 
+// Set display with color or not
 func (w *ConsoleWriter) SetColored(colored bool) {
 	w.colored = colored
 }
 
+// Set colors for specified level of log
 func (w *ConsoleWriter) SetBrush(brush string, level LogLevel) {
 	w.brush[level] = []byte(brush)
 }

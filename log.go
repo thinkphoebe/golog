@@ -1,3 +1,4 @@
+// Golog is a lightweight and expandable logger for Golang.
 package golog
 
 import (
@@ -27,10 +28,14 @@ type headerSession struct {
 	genHeader genHeaderFunc
 }
 
+// Output interface of Logger. Users can implement this interface to output to other destinations such as udp.
 type IOutput interface {
 	Write(msg []byte, level LogLevel)
 }
 
+// A Logger represents an active logging object that generates lines of
+// output to an IOutput. A Logger can be used simultaneously from
+// multiple goroutines; it guarantees to serialize access to the Writer.
 type Logger struct {
 	mu             sync.Mutex
 	outs           []IOutput
@@ -38,6 +43,7 @@ type Logger struct {
 	headerSessions []headerSession
 }
 
+// Users can redirect an os.File to log by AddRedirect(). AddRedirect() returns a Redirector for CancelRedirect().
 type Redirector struct {
 	tag     string
 	oldAddr **os.File
@@ -54,7 +60,10 @@ const (
 	LevelError
 	LevelCritical
 )
-const CallDepth = 2
+
+// Parameter calldepth is used to recover the PC for file name and line no print.
+// In general use, you should set calldepth to NormalDepth on call Output() or Outputf().
+const NormalDepth = 2
 
 var levels = [...]string{int(LevelDebug): "D", int(LevelInfo): "I", int(LevelWarn): "W", int(LevelError): "E", int(LevelCritical): "C"}
 
@@ -70,11 +79,12 @@ func NewLogger(out IOutput, level LogLevel, fmtStr string) (*Logger, error) {
 	return l, err
 }
 
-func SetLevelName(level LogLevel, name string) {
+// By default, log level is printed as 'D', 'I', 'W', 'E' and 'C', you could modify them by SetLevelTag().
+func SetLevelTag(level LogLevel, name string) {
 	levels[level] = name
 }
 
-func LevelName(level LogLevel) string {
+func LevelTag(level LogLevel) string {
 	return levels[level]
 }
 
@@ -82,11 +92,13 @@ func (l *Logger) Level() LogLevel {
 	return l.level
 }
 
-//SetLevel is not locked
+// If you set log level to LevelWarn, only Warn, Error and Critical logs will be output.
 func (l *Logger) SetLevel(level LogLevel) {
+	//SetLevel is not locked
 	l.level = level
 }
 
+// Add an output to write. You can add more than one output.
 func (l *Logger) AddOutput(w IOutput) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -105,6 +117,7 @@ func (l *Logger) RemoveOutput(w IOutput) bool {
 	return false
 }
 
+// Redirect an os.File to log, such as os.stderr.
 func (l *Logger) AddRedirect(file **os.File, level LogLevel, tag string) *Redirector {
 	pr, pw, err := os.Pipe()
 	if err != nil {
@@ -116,7 +129,7 @@ func (l *Logger) AddRedirect(file **os.File, level LogLevel, tag string) *Redire
 	go func() {
 		scanner := bufio.NewScanner(pr)
 		for scanner.Scan() {
-			l.Outputf(level, CallDepth, "%s %s", tag, scanner.Text())
+			l.Outputf(level, NormalDepth, "%s %s", tag, scanner.Text())
 		}
 		l.Warnf("read redirector pipe %s complete", tag)
 	}()
@@ -130,6 +143,7 @@ func (l *Logger) AddRedirect(file **os.File, level LogLevel, tag string) *Redire
 	return &r
 }
 
+// Cancel an os.File redirect added by AddRedirect.
 func (l *Logger) CancelRedirect(r *Redirector) {
 	l.Warnf("close redirector pipe %s", r.tag)
 	r.pipe.Close()
@@ -264,31 +278,33 @@ func (l *Logger) Outputf(level LogLevel, calldepth int, format string, a ...inte
 }
 
 func (l *Logger) Debugf(format string, a ...interface{}) {
-	l.Outputf(LevelDebug, CallDepth+1, format, a...)
+	l.Outputf(LevelDebug, NormalDepth+1, format, a...)
 }
 
 func (l *Logger) Infof(format string, a ...interface{}) {
-	l.Outputf(LevelInfo, CallDepth+1, format, a...)
+	l.Outputf(LevelInfo, NormalDepth+1, format, a...)
 }
 
 func (l *Logger) Warnf(format string, a ...interface{}) {
-	l.Outputf(LevelWarn, CallDepth+1, format, a...)
+	l.Outputf(LevelWarn, NormalDepth+1, format, a...)
 }
 
 func (l *Logger) Errorf(format string, a ...interface{}) {
-	l.Outputf(LevelError, CallDepth+1, format, a...)
+	l.Outputf(LevelError, NormalDepth+1, format, a...)
 }
 
 func (l *Logger) Critical(format string, a ...interface{}) {
-	l.Outputf(LevelCritical, CallDepth+1, format, a...)
+	l.Outputf(LevelCritical, NormalDepth+1, format, a...)
 }
 
-// ================ the following functions write to the default logger ================
+// ================ the following functions write to the global logger ================
 
-var std, _ = NewLogger(NewConsoleWriter(os.Stderr), LevelInfo, "%(asctime) [%(levelno)][%(filename):%(lineno)] ")
+// ConsoleWriter object used by the global logger.
+var GConsoleWriter = NewConsoleWriter(os.Stderr)
+var std, _ = NewLogger(GConsoleWriter, LevelInfo, "%(asctime) [%(levelno)][%(filename):%(lineno)] ")
 
-// This function is designed to modify the settings of default logger on program start.
-// Since no lock when modifying variable "std", callers should ensure no multi-goroutines access.
+// You can use this method to modify settings of the global logger on program start.
+// Since no lock callers should ensure no multi-goroutines access.
 func Init(out IOutput, level LogLevel, fmtStr string) error {
 	l, err := NewLogger(out, level, fmtStr)
 	if err == nil {
@@ -313,8 +329,10 @@ func Outputf(level LogLevel, calldepth int, format string, a ...interface{}) {
 	std.Outputf(level, calldepth+1, format, a...)
 }
 
-func Debugf(format string, a ...interface{})    { std.Outputf(LevelDebug, CallDepth+1, format, a...) }
-func Infof(format string, a ...interface{})     { std.Outputf(LevelInfo, CallDepth+1, format, a...) }
-func Warnf(format string, a ...interface{})     { std.Outputf(LevelWarn, CallDepth+1, format, a...) }
-func Errorf(format string, a ...interface{})    { std.Outputf(LevelError, CallDepth+1, format, a...) }
-func Criticalf(format string, a ...interface{}) { std.Outputf(LevelCritical, CallDepth+1, format, a...) }
+func Debugf(format string, a ...interface{}) { std.Outputf(LevelDebug, NormalDepth+1, format, a...) }
+func Infof(format string, a ...interface{})  { std.Outputf(LevelInfo, NormalDepth+1, format, a...) }
+func Warnf(format string, a ...interface{})  { std.Outputf(LevelWarn, NormalDepth+1, format, a...) }
+func Errorf(format string, a ...interface{}) { std.Outputf(LevelError, NormalDepth+1, format, a...) }
+func Criticalf(format string, a ...interface{}) {
+	std.Outputf(LevelCritical, NormalDepth+1, format, a...)
+}
