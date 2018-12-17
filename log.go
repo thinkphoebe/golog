@@ -88,6 +88,15 @@ func LevelTag(level LogLevel) string {
 	return levels[level]
 }
 
+func TagLevel(name string) LogLevel {
+	for i, v := range levels {
+		if v == name {
+			return LogLevel(i)
+		}
+	}
+	return LevelDebug
+}
+
 func (l *Logger) Level() LogLevel {
 	return l.level
 }
