@@ -198,6 +198,23 @@ func (l *Logger) setHeaderFormat(fmtStr string) error {
 		}
 	}
 
+	appendInt := func(b []byte, x int, width int) []byte {
+		var buf [20]byte
+		i := len(buf)
+		for x >= 10 {
+			i--
+			q := x / 10
+			buf[i] = byte('0' + x - q*10)
+			x = q
+		}
+		i--
+		buf[i] = byte('0' + x)
+		for w := len(buf) - i; w < width; w++ {
+			b = append(b, '0')
+		}
+		return append(b, buf[i:]...)
+	}
+
 	reg, err := regexp.Compile(`%\([\w\:]+\)`)
 	if err != nil {
 		return err
@@ -229,7 +246,24 @@ func (l *Logger) setHeaderFormat(fmtStr string) error {
 				name:   name,
 				isCopy: false,
 				genHeader: func(buf *[]byte, item *logItem) {
-					*buf = time.Now().AppendFormat(*buf, "2006-01-02 15:04:05.999")
+					//*buf = time.Now().AppendFormat(*buf, "2006-01-02 15:04:05.999")
+					now := time.Now()
+					year, mon, day := now.Date()
+					hour, min, sec := now.Clock()
+					nsec := now.Nanosecond()
+					*buf = appendInt(*buf, year, 4)
+					*buf = append(*buf, []byte("-")...)
+					*buf = appendInt(*buf, int(mon), 2)
+					*buf = append(*buf, []byte("-")...)
+					*buf = appendInt(*buf, day, 2)
+					*buf = append(*buf, []byte(" ")...)
+					*buf = appendInt(*buf, hour, 2)
+					*buf = append(*buf, []byte(":")...)
+					*buf = appendInt(*buf, min, 2)
+					*buf = append(*buf, []byte(":")...)
+					*buf = appendInt(*buf, sec, 2)
+					*buf = append(*buf, []byte(".")...)
+					*buf = appendInt(*buf, nsec/1000000, 3)
 				},
 			})
 		case "filename":
