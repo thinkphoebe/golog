@@ -3,6 +3,7 @@ package golog
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"regexp"
@@ -16,6 +17,7 @@ import (
 type logItem struct {
 	level     LogLevel
 	filename  string
+	function  string
 	line      int
 	calldepth int
 }
@@ -23,10 +25,13 @@ type logItem struct {
 type genHeaderFunc func(buf *[]byte, item *logItem)
 
 type headerSession struct {
+	name      string
 	isCopy    bool
 	strCopy   string
 	genHeader genHeaderFunc
 }
+
+type Json map[string]interface{}
 
 // Output interface of Logger. Users can implement this interface to output to other destinations such as udp.
 type IOutput interface {
@@ -164,14 +169,36 @@ func (l *Logger) CancelRedirect(r *Redirector) {
 func (l *Logger) setHeaderFormat(fmtStr string) error {
 	initCaller := func(item *logItem) {
 		var ok bool
-		_, item.filename, item.line, ok = runtime.Caller(item.calldepth + 1)
-		if !ok {
+		var pc uintptr
+		pc, item.filename, item.line, ok = runtime.Caller(item.calldepth + 1)
+		if ok {
+			var f = runtime.FuncForPC(pc)
+			if f != nil {
+				item.function = f.Name()
+			} else {
+				item.function = "???"
+			}
+		} else {
 			item.filename = "???"
 			item.line = 0
 		}
+
+		i := strings.LastIndexByte(item.filename, '/')
+		if i >= 0 {
+			item.filename = item.filename[i+1:]
+		}
+
+		i = strings.LastIndexByte(item.function, '/')
+		if i >= 0 {
+			item.function = item.function[i+1:]
+		}
+		i = strings.IndexByte(item.function, '.')
+		if i >= 0 {
+			item.function = item.function[i+1:]
+		}
 	}
 
-	reg, err := regexp.Compile(`%\([\w]+\)`)
+	reg, err := regexp.Compile(`%\([\w\:]+\)`)
 	if err != nil {
 		return err
 	}
@@ -189,31 +216,47 @@ func (l *Logger) setHeaderFormat(fmtStr string) error {
 			})
 		}
 
-		kw := fmtStr[match[0]:match[1]]
-		switch kw {
-		case "%(asctime)":
+		kw := fmtStr[match[0]+2 : match[1]-1]
+		secs := strings.Split(kw, ":")
+		name := secs[0]
+		if len(secs) > 1 {
+			name = secs[1]
+		}
+
+		switch secs[0] {
+		case "asctime":
 			sessions = append(sessions, headerSession{
+				name:   name,
 				isCopy: false,
 				genHeader: func(buf *[]byte, item *logItem) {
 					*buf = time.Now().AppendFormat(*buf, "2006-01-02 15:04:05.999")
 				},
 			})
-		case "%(filename)":
+		case "filename":
 			sessions = append(sessions, headerSession{
+				name:   name,
 				isCopy: false,
 				genHeader: func(buf *[]byte, item *logItem) {
 					if len(item.filename) == 0 {
 						initCaller(item)
 					}
-					i := strings.LastIndexByte(item.filename, '/')
-					if i >= 0 {
-						item.filename = item.filename[i+1:]
-					}
 					*buf = append(*buf, item.filename...)
 				},
 			})
-		case "%(lineno)":
+		case "function":
 			sessions = append(sessions, headerSession{
+				name:   name,
+				isCopy: false,
+				genHeader: func(buf *[]byte, item *logItem) {
+					if len(item.function) == 0 {
+						initCaller(item)
+					}
+					*buf = append(*buf, item.function...)
+				},
+			})
+		case "lineno":
+			sessions = append(sessions, headerSession{
+				name:   name,
 				isCopy: false,
 				genHeader: func(buf *[]byte, item *logItem) {
 					if item.line < 0 {
@@ -222,8 +265,9 @@ func (l *Logger) setHeaderFormat(fmtStr string) error {
 					*buf = append(*buf, strconv.Itoa(item.line)...)
 				},
 			})
-		case "%(levelno)":
+		case "levelno":
 			sessions = append(sessions, headerSession{
+				name:   name,
 				isCopy: false,
 				genHeader: func(buf *[]byte, item *logItem) {
 					*buf = append(*buf, levels[item.level]...)
@@ -252,7 +296,7 @@ func (l *Logger) output(level LogLevel, calldepth int, s string) {
 
 	item := logItem{
 		level:     level,
-		calldepth: calldepth + 1,
+		calldepth: calldepth,
 	}
 	for _, s := range l.headerSessions {
 		if s.isCopy {
@@ -276,13 +320,13 @@ func (l *Logger) output(level LogLevel, calldepth int, s string) {
 
 func (l *Logger) Output(level LogLevel, calldepth int, a ...interface{}) {
 	if level >= l.level {
-		l.output(level, calldepth, fmt.Sprint(a...))
+		l.output(level, calldepth+1, fmt.Sprint(a...))
 	}
 }
 
 func (l *Logger) Outputf(level LogLevel, calldepth int, format string, a ...interface{}) {
 	if level >= l.level {
-		l.output(level, calldepth, fmt.Sprintf(format, a...))
+		l.output(level, calldepth+1, fmt.Sprintf(format, a...))
 	}
 }
 
@@ -306,11 +350,57 @@ func (l *Logger) Critical(format string, a ...interface{}) {
 	l.Outputf(LevelCritical, NormalDepth+1, format, a...)
 }
 
+func (l *Logger) OutputJson(level LogLevel, calldepth int, items Json) {
+	if level < l.level {
+		return
+	}
+
+	item := logItem{
+		level:     level,
+		calldepth: calldepth,
+	}
+	for _, s := range l.headerSessions {
+		if !s.isCopy {
+			var value []byte
+			s.genHeader(&value, &item)
+			items[s.name] = string(value)
+		}
+	}
+
+	buf, err := json.Marshal(items)
+	if err != nil {
+		return
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, w := range l.outs {
+		w.Write(buf, level)
+		w.Write([]byte("\n"), level)
+	}
+}
+
+func (l *Logger) DebugJson(items Json) {
+	l.OutputJson(LevelDebug, NormalDepth+1, items)
+}
+func (l *Logger) InfoJson(items Json) {
+	l.OutputJson(LevelInfo, NormalDepth+1, items)
+}
+func (l *Logger) WarnJson(items Json) {
+	l.OutputJson(LevelWarn, NormalDepth+1, items)
+}
+func (l *Logger) ErrorJson(items Json) {
+	l.OutputJson(LevelError, NormalDepth+1, items)
+}
+func (l *Logger) CriticalJson(items Json) {
+	l.OutputJson(LevelDebug, NormalDepth+1, items)
+}
+
 // ================ the following functions write to the global logger ================
 
 // ConsoleWriter object used by the global logger.
 var GConsoleWriter = NewConsoleWriter(os.Stderr)
-var std, _ = NewLogger(GConsoleWriter, LevelInfo, "%(asctime) [%(levelno)][%(filename):%(lineno)] ")
+var std, _ = NewLogger(GConsoleWriter, LevelInfo, "%(asctime) [%(levelno)][%(filename):%(function):%(lineno)] ")
 
 // You can use this method to modify settings of the global logger on program start.
 // Since no lock callers should ensure no multi-goroutines access.
