@@ -364,6 +364,10 @@ func (l *Logger) Outputf(level LogLevel, calldepth int, format string, a ...inte
 	}
 }
 
+func (l *Logger) Logf(level LogLevel, format string, a ...interface{}) {
+	l.Outputf(level, NormalDepth+1, format, a...)
+}
+
 func (l *Logger) Debugf(format string, a ...interface{}) {
 	l.Outputf(LevelDebug, NormalDepth+1, format, a...)
 }
@@ -380,7 +384,7 @@ func (l *Logger) Errorf(format string, a ...interface{}) {
 	l.Outputf(LevelError, NormalDepth+1, format, a...)
 }
 
-func (l *Logger) Critical(format string, a ...interface{}) {
+func (l *Logger) Criticalf(format string, a ...interface{}) {
 	l.Outputf(LevelCritical, NormalDepth+1, format, a...)
 }
 
@@ -412,6 +416,10 @@ func (l *Logger) OutputJson(level LogLevel, calldepth int, items Json) {
 		w.Write(buf, level)
 		w.Write([]byte("\n"), level)
 	}
+}
+
+func (l *Logger) LogJson(level LogLevel, items Json) {
+	l.OutputJson(level, NormalDepth+1, items)
 }
 
 func (l *Logger) DebugJson(items Json) {
@@ -462,6 +470,7 @@ func Outputf(level LogLevel, calldepth int, format string, a ...interface{}) {
 	std.Outputf(level, calldepth+1, format, a...)
 }
 
+func Logf(level LogLevel, format string, a ...interface{}) { std.Outputf(level, NormalDepth+1, format, a...) }
 func Debugf(format string, a ...interface{}) { std.Outputf(LevelDebug, NormalDepth+1, format, a...) }
 func Infof(format string, a ...interface{})  { std.Outputf(LevelInfo, NormalDepth+1, format, a...) }
 func Warnf(format string, a ...interface{})  { std.Outputf(LevelWarn, NormalDepth+1, format, a...) }
