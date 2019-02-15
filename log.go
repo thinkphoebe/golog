@@ -393,22 +393,30 @@ func (l *Logger) OutputJson(level LogLevel, calldepth int, items Json) {
 		return
 	}
 
+	var buf []byte
+
 	item := logItem{
 		level:     level,
 		calldepth: calldepth,
 	}
-	for _, s := range l.headerSessions {
-		if !s.isCopy {
+	for index, s := range l.headerSessions {
+		if s.isCopy {
+			// ATTENTION if first header session is string const, it will be added to header of json string
+			if index == 0 {
+				buf = append(buf, s.strCopy...)
+			}
+		} else {
 			var value []byte
 			s.genHeader(&value, &item)
 			items[s.name] = string(value)
 		}
 	}
 
-	buf, err := json.Marshal(items)
+	bufJson, err := json.Marshal(items)
 	if err != nil {
 		return
 	}
+	buf = append(buf, bufJson...)
 
 	l.mu.Lock()
 	defer l.mu.Unlock()
