@@ -29,8 +29,8 @@ func ExampleConsoleWriter() {
 func ExampleRotateWriter() {
 	fmtStr := `%(asctime) [%(levelno)][%(filename):%(lineno)] `
 	w := log.NewRotateWriter("Rotate.log", log.RotateBySize)
-	w.SetRotateSize(100 * 1000 * 1000)
-	log.Init(w, log.LevelDebug, fmtStr)
+	w.SetRotateSize(1000)
+	log.Init(w, log.LevelDebug, fmtStr, false)
 }
 
 func ExampleAddOutput() {
@@ -38,7 +38,8 @@ func ExampleAddOutput() {
 	wFile := log.NewRotateWriter("Multi.log", log.RotateByHour)
 	log.AddOutput(wFile)
 	log.Infof("both write to both stderr and log file")
-	log.Infof("remove file output %t", log.RemoveOutput(log.GConsoleWriter))
+	log.Infof("remove file output")
+	log.RemoveOutput(log.GConsoleWriter)
 	log.Infof("only write to log file")
 }
 
@@ -63,7 +64,7 @@ func ExampleAddRedirect() {
 
 func ExampleNewLogger() {
 	fmtStr := `%(asctime) [%(levelno)][%(filename):%(lineno)] `
-	logger, err := log.NewLogger(log.NewRotateWriter("golog.log", log.RotateByHour), log.LevelDebug, fmtStr)
+	logger, err := log.NewLogger(log.NewRotateWriter("golog.log", log.RotateByHour), log.LevelDebug, fmtStr, false)
 	if err != nil {
 		// error handling
 	}

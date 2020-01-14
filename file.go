@@ -3,7 +3,6 @@ package golog
 import (
 	"fmt"
 	"os"
-	"syscall"
 	"time"
 )
 
@@ -31,12 +30,13 @@ type RotateWriter struct {
 	rotateSize int64
 	writedSize int64
 	suffix     string
+	rotateFlag int
 	fp         *os.File
 }
 
 // Create a new RotateWriter
 func NewRotateWriter(file string, mode RotateMode) *RotateWriter {
-	w := &RotateWriter{file: file, rotateMode: mode, rotateSize: defaultRotateSize}
+	w := &RotateWriter{file: file, rotateMode: mode, rotateSize: defaultRotateSize, rotateFlag: -1}
 	err := w.rotate()
 	if err != nil {
 		return nil
@@ -61,41 +61,47 @@ func (w *RotateWriter) SetRotateSize(size int64) {
 }
 
 func (w *RotateWriter) rotate() error {
-	var suffix string
+	suffix := ""
+	rotate := false
+	t := time.Now()
 
-	if w.rotateMode == RotateByDay {
-		suffix = time.Now().Format(format_time_day)
-	} else if w.rotateMode == RotateByHour {
-		suffix = time.Now().Format(format_time_hour)
-	} else if w.rotateMode == RotateBySize {
-		if w.suffix == "" {
-			fi, err := os.Stat(w.file)
-			if err == nil {
-				stat := fi.Sys().(*syscall.Stat_t)
-				ctime := time.Unix(int64(stat.Ctim.Sec), int64(stat.Ctim.Nsec))
-				w.suffix = ctime.Format(format_time_size)
-				w.writedSize = fi.Size()
+	// on first write
+	if w.fp == nil {
+		rotate = true
+		info, err := os.Stat(w.file)
+		if err == nil {
+			if w.rotateMode == RotateByDay && info.ModTime().Day() != t.Day() {
+				w.suffix = info.ModTime().Format(format_time_day)
+			} else if w.rotateMode == RotateByHour && info.ModTime().Hour() != t.Hour() {
+				w.suffix = info.ModTime().Format(format_time_hour)
+			} else if w.rotateMode == RotateBySize {
+				w.writedSize = info.Size()
 			}
 		}
-		suffix = w.suffix
-		if w.writedSize >= w.rotateSize {
-			suffix = time.Now().Format(format_time_size)
-		}
-	} else {
-		return nil
 	}
 
-	if w.fp == nil || suffix != w.suffix {
+	if w.rotateMode == RotateByDay && w.rotateFlag != t.Day() {
+		rotate = true
+		w.rotateFlag = t.Day()
+		suffix = t.Format(format_time_day)
+	} else if w.rotateMode == RotateByHour && w.rotateFlag != t.Hour() {
+		rotate = true
+		w.rotateFlag = t.Hour()
+		suffix = t.Format(format_time_hour)
+	} else if w.rotateMode == RotateBySize && w.writedSize > w.rotateSize {
+		rotate = true
+		w.writedSize = 0
+		// ATTENTION use current time as rotated file name
+		w.suffix = t.Format(format_time_size)
+	}
+
+	if rotate {
 		return w.doRotate(suffix)
 	}
 	return nil
 }
 
 func (w *RotateWriter) doRotate(suffix string) error {
-	if w.fp != nil {
-		w.fp.Close()
-	}
-
 	if w.suffix != "" {
 		info, err := os.Stat(w.file)
 		if err == nil && !info.IsDir() {
@@ -107,10 +113,14 @@ func (w *RotateWriter) doRotate(suffix string) error {
 		}
 	}
 
-	f, err := os.OpenFile(w.file, os.O_CREATE|os.O_APPEND|os.O_RDWR, 0666)
+	f, err := os.OpenFile(w.file, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0666)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "RotateWriter open log file error [%v]\n", err)
 		return err
+	}
+
+	if w.fp != nil {
+		w.fp.Close()
 	}
 	w.fp = f
 	w.suffix = suffix

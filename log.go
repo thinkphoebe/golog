@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+type LogLevel int
+
 type logItem struct {
 	level     LogLevel
 	filename  string
@@ -25,10 +27,25 @@ type logItem struct {
 type genHeaderFunc func(buf *[]byte, item *logItem)
 
 type headerSession struct {
-	name      string
+	name      string // used as key of json output
 	isCopy    bool
 	strCopy   string
 	genHeader genHeaderFunc
+}
+
+type outWriter struct {
+	writer IOutput
+	chIn   chan *outItem
+}
+
+type outItem struct {
+	msg   []byte
+	level LogLevel
+}
+
+type cmdItem struct {
+	cmd   int         // 0 -> add outWriter, 1 -> remove outWriter
+	param interface{} // 0, 1 -> IOutput
 }
 
 type Json map[string]interface{}
@@ -43,8 +60,11 @@ type IOutput interface {
 // multiple goroutines; it guarantees to serialize access to the Writer.
 type Logger struct {
 	mu             sync.Mutex
-	outs           []IOutput
+	outs           []outWriter
 	level          LogLevel
+	async          bool
+	chOut          chan *outItem
+	chCmd          chan *cmdItem
 	headerSessions []headerSession
 }
 
@@ -55,8 +75,6 @@ type Redirector struct {
 	old     *os.File
 	pipe    *os.File
 }
-
-type LogLevel int
 
 const (
 	LevelDebug LogLevel = iota
@@ -69,17 +87,27 @@ const (
 // Parameter calldepth is used to recover the PC for file name and line no print.
 // In general use, you should set calldepth to NormalDepth on call Output() or Outputf().
 const NormalDepth = 2
+const AsyncBuffer = 1000
+const OutputBuffer = 10000
 
 var levels = [...]string{int(LevelDebug): "D", int(LevelInfo): "I", int(LevelWarn): "W", int(LevelError): "E", int(LevelCritical): "C"}
 
-func NewLogger(out IOutput, level LogLevel, fmtStr string) (*Logger, error) {
+func NewLogger(out IOutput, level LogLevel, fmtStr string, async bool) (*Logger, error) {
 	l := &Logger{
 		level: level,
-		outs:  []IOutput{out},
+		async: async,
 	}
 	err := l.setHeaderFormat(fmtStr)
 	if err != nil {
 		l = nil
+	} else {
+		if async {
+			l.chOut = make(chan *outItem, AsyncBuffer)
+			l.chCmd = make(chan *cmdItem, 100)
+			go l.copyRoutine()
+		}
+
+		l.AddOutput(out)
 	}
 	return l, err
 }
@@ -112,23 +140,80 @@ func (l *Logger) SetLevel(level LogLevel) {
 	l.level = level
 }
 
-// Add an output to write. You can add more than one output.
-func (l *Logger) AddOutput(w IOutput) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.outs = append(l.outs, w)
-}
-
-func (l *Logger) RemoveOutput(w IOutput) bool {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for i, v := range l.outs {
-		if v == w {
-			l.outs = append(l.outs[:i], l.outs[i+1:]...)
-			return true
+// copy logs from chOut to chIn of each outWriter
+func (l *Logger) copyRoutine() {
+	for {
+		select {
+		case item := <-l.chOut:
+			for _, out := range l.outs {
+				out.chIn <- item
+			}
+		case cmd, ok := <-l.chCmd:
+			if !ok {
+				break
+			}
+			if cmd.cmd == 0 {
+				l.addOutput(cmd.param.(IOutput))
+			} else if cmd.cmd == 1 {
+				l.removeOutput(cmd.param.(IOutput))
+			}
 		}
 	}
-	return false
+}
+
+func (l *Logger) outputRoutine(out *outWriter) {
+	for {
+		item, ok := <-out.chIn
+		if !ok {
+			break
+		}
+		if len(out.chIn) > OutputBuffer*3/5 && item.level <= LevelDebug ||
+			len(out.chIn) > OutputBuffer*4/5 && item.level <= LevelInfo {
+			continue
+		}
+		out.writer.Write(item.msg, item.level)
+	}
+}
+
+func (l *Logger) addOutput(w IOutput) {
+	out := outWriter{writer: w}
+	if l.async {
+		out.chIn = make(chan *outItem, OutputBuffer)
+		go l.outputRoutine(&out)
+	}
+	l.outs = append(l.outs, out)
+}
+
+// Add an outWriter to write. You can add more than one outWriter.
+func (l *Logger) AddOutput(w IOutput) {
+	if l.async {
+		l.chCmd <- &cmdItem{cmd: 0, param: w}
+	} else {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.addOutput(w)
+	}
+}
+
+func (l *Logger) removeOutput(w IOutput) {
+	for i, v := range l.outs {
+		if v.writer == w {
+			l.outs = append(l.outs[:i], l.outs[i+1:]...)
+			if l.async {
+				close(v.chIn)
+			}
+		}
+	}
+}
+
+func (l *Logger) RemoveOutput(w IOutput) {
+	if l.async {
+		l.chCmd <- &cmdItem{cmd: 1, param: w}
+	} else {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.removeOutput(w)
+	}
 }
 
 // Redirect an os.File to log, such as os.stderr.
@@ -162,6 +247,18 @@ func (l *Logger) CancelRedirect(r *Redirector) {
 	l.Warnf("close redirector pipe %s", r.tag)
 	r.pipe.Close()
 	*r.oldAddr = r.old
+}
+
+// An async logger should be Close() to avoid resource leak.
+// Before Close() any redirect should be canceled.
+func (l *Logger) Close() {
+	if l.async {
+		close(l.chCmd)
+		close(l.chOut)
+		for _, v := range l.outs {
+			close(v.chIn)
+		}
+	}
 }
 
 // Please ATTENTION that header format is not designed to be modify after logger created.
@@ -325,6 +422,18 @@ func (l *Logger) setHeaderFormat(fmtStr string) error {
 	return nil
 }
 
+func (l *Logger) write(msg []byte, level LogLevel) {
+	if l.async {
+		l.chOut <- &outItem{msg: msg, level: level}
+	} else {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		for _, w := range l.outs {
+			w.writer.Write(msg, level)
+		}
+	}
+}
+
 func (l *Logger) output(level LogLevel, calldepth int, s string) {
 	var buf []byte
 
@@ -344,12 +453,7 @@ func (l *Logger) output(level LogLevel, calldepth int, s string) {
 	if len(s) == 0 || s[len(s)-1] != '\n' {
 		buf = append(buf, '\n')
 	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for _, w := range l.outs {
-		w.Write(buf, level)
-	}
+	l.write(buf, level)
 }
 
 func (l *Logger) Output(level LogLevel, calldepth int, a ...interface{}) {
@@ -417,13 +521,8 @@ func (l *Logger) OutputJson(level LogLevel, calldepth int, items Json) {
 		return
 	}
 	buf = append(buf, bufJson...)
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	for _, w := range l.outs {
-		w.Write(buf, level)
-		w.Write([]byte("\n"), level)
-	}
+	buf = append(buf, '\n')
+	l.write(buf, level)
 }
 
 func (l *Logger) LogJson(level LogLevel, items Json) {
@@ -450,12 +549,12 @@ func (l *Logger) CriticalJson(items Json) {
 
 // ConsoleWriter object used by the global logger.
 var GConsoleWriter = NewConsoleWriter(os.Stderr)
-var std, _ = NewLogger(GConsoleWriter, LevelInfo, "%(asctime) [%(levelno)][%(filename):%(function):%(lineno)] ")
+var std, _ = NewLogger(GConsoleWriter, LevelInfo, "%(asctime) [%(levelno)][%(filename):%(function):%(lineno)] ", false)
 
 // You can use this method to modify settings of the global logger on program start.
 // Since no lock callers should ensure no multi-goroutines access.
-func Init(out IOutput, level LogLevel, fmtStr string) error {
-	l, err := NewLogger(out, level, fmtStr)
+func Init(out IOutput, level LogLevel, fmtStr string, async bool) error {
+	l, err := NewLogger(out, level, fmtStr, async)
 	if err == nil {
 		std = l
 	}
@@ -465,8 +564,8 @@ func Init(out IOutput, level LogLevel, fmtStr string) error {
 func Level() LogLevel         { return std.Level() }
 func SetLevel(level LogLevel) { std.SetLevel(level) }
 
-func AddOutput(w IOutput)         { std.AddOutput(w) }
-func RemoveOutput(w IOutput) bool { return std.RemoveOutput(w) }
+func AddOutput(w IOutput)    { std.AddOutput(w) }
+func RemoveOutput(w IOutput) { std.RemoveOutput(w) }
 
 func AddRedirect(file **os.File, level LogLevel, tag string) *Redirector {
 	return std.AddRedirect(file, level, tag)
@@ -478,7 +577,9 @@ func Outputf(level LogLevel, calldepth int, format string, a ...interface{}) {
 	std.Outputf(level, calldepth+1, format, a...)
 }
 
-func Logf(level LogLevel, format string, a ...interface{}) { std.Outputf(level, NormalDepth+1, format, a...) }
+func Logf(level LogLevel, format string, a ...interface{}) {
+	std.Outputf(level, NormalDepth+1, format, a...)
+}
 func Debugf(format string, a ...interface{}) { std.Outputf(LevelDebug, NormalDepth+1, format, a...) }
 func Infof(format string, a ...interface{})  { std.Outputf(LevelInfo, NormalDepth+1, format, a...) }
 func Warnf(format string, a ...interface{})  { std.Outputf(LevelWarn, NormalDepth+1, format, a...) }
